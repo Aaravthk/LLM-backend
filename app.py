@@ -68,12 +68,17 @@ with st.sidebar:
     elif mode == "Resume Chat":
         session_id = st.text_input("Enter Session ID")
         if st.button("Load Chat"):
-            if load_session(session_id):
-                st.session_state.session_id = session_id
-                st.success(f"Loaded session: {session_id}")
-                st.rerun()
-            else:
-                st.error("Session ID not found!")
+            with st.spinner("Loading chat"):
+                if load_session(session_id):
+                    st.session_state.session_id = session_id
+                    st.session_state.loaded = True
+                    st.rerun()
+                else:
+                    st.error("Session ID not found!")
+    
+    if st.session_state.get("loaded"):
+        st.success(f"Successfully loaded!")
+        del st.session_state.loaded
 
     if "session_id" in st.session_state:
         st.caption(f"Current session ID: `{st.session_state.session_id}`")
