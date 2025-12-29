@@ -87,11 +87,13 @@ def get_history_for_gemini(messages):
         })
     return gemini_history
 
+if not st.session_state.get("user_id_input"):
+    st.warning("Please enter UserID in sidebar to continue.")
+
 with st.sidebar:
     st.subheader("Login")
     user_id = st.text_input("User ID", key = "user_id_input", on_change = handle_user_change)
     if not user_id:
-        st.warning("Please enter a User ID to start")
         st.session_state.messages = []
         st.session_state.file = None
         if "chat" in st.session_state: del st.session_state.chat
@@ -114,7 +116,9 @@ with st.sidebar:
 
         past_sessions = get_user_sessions(user_id)
         for sess_id in past_sessions:
-            if st.button(f"Chat {sess_id}", key = f"btn_{sess_id}", use_container_width = True):
+            is_active = (sess_id == st.session_state.session_id)
+            btn_type = "primary" if is_active else "secondary"
+            if st.button(f"Chat {sess_id}", type = btn_type, key = f"btn_{sess_id}", use_container_width = True):
                 if load_session(sess_id):
                     st.session_state.session_id = sess_id
                     st.session_state.file = []
@@ -135,6 +139,9 @@ with st.sidebar:
     
     if not uploaded_file and "file" in st.session_state:
         del st.session_state.file
+
+if "user_id_input" not in st.session_state:
+    st.warning("Please enter UserID in sidebar to continue.")
 
 if "chat" not in st.session_state:
     history_payload = []
