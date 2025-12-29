@@ -1,3 +1,4 @@
 google-genai
 streamlit
-redis
+pymongo[srv]==3.12
+certifi

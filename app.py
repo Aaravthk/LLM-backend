@@ -2,9 +2,11 @@ import streamlit as st
 from google import genai
 import tempfile
 import os
-import redis
+import pymongo
 import json
 import uuid
+import datetime
+import certifi
 
 st.header("LLM-Backend-Prototype")
     
@@ -12,24 +14,64 @@ if "client" not in st.session_state:
     st.session_state.client = genai.Client(api_key = st.secrets["GEMINI_API_KEY"])
 
 @st.cache_resource
-def get_redis_connection():
-    return redis.Redis.from_url(st.secrets["REDIS_URL"], decode_responses = True)
+def get_mongo_connection():
+    client = pymongo.MongoClient(
+        st.secrets["MONGO_URI"],
+        tlsCAFile = certifi.where()
+    )
+    db = client["llm_app_db"]
+    return db["chats"]
 
-redis_client = get_redis_connection()
+chats_collection = get_mongo_connection()
+
+def create_new_session(user_id):
+    if chats_collection is None: return str(uuid.uuid4())[:8]
+    new_id = str(uuid.uuid4())[:8]
+    doc = {
+        "_id": new_id,
+        "user_id": user_id,
+        "history": [],
+        "created_at": datetime.datetime.utcnow()
+    }
+    chats_collection.insert_one(doc)
+    return new_id
+
+def get_user_sessions(user_id):
+    if chats_collection is None: return []
+    cursor = chats_collection.find(
+        {"user_id": user_id},
+        {"_id" : 1}
+    ).sort("created_at", -1)
+
+    return [doc["_id"] for doc in cursor]
 
 def save_session(session_id):
-    data = {
-        "messages" : st.session_state.messages
-    }
-    redis_client.set(session_id, json.dumps(data))
+    if chats_collection is None: return
+
+    history_text = st.session_state.messages
+
+    chats_collection.update_one(
+        {"_id": session_id},
+        {"$set": {"history": history_text}}
+    )
 
 def load_session(session_id):
-    data = redis_client.get(session_id)
-    if data:
-        parsed = json.loads(data)
-        st.session_state.messages = parsed["messages"]
+    if chats_collection is None: return False
+
+    doc = chats_collection.find_one({"_id": session_id})
+    if doc:
+        st.session_state.messages = doc.get("history", [])
         return True
     return False
+
+def handle_user_change():
+    st.session_state.messages = []
+    st.session_state.file = []
+    if "chat" in st.session_state:
+        del st.session_state.chat
+    
+    new_user = st.session_state.user_id_input
+    st.session_state.session_id = create_new_session(new_user)
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -45,46 +87,39 @@ def get_history_for_gemini(messages):
         })
     return gemini_history
 
-if "chat" not in st.session_state:
-    history_payload = []
-    if "messages" in st.session_state:
-        history_payload = get_history_for_gemini(st.session_state.messages)
-    
-    st.session_state.chat = st.session_state.client.chats.create(
-        model = "gemini-2.5-flash",
-        history=history_payload
-    )
-
 with st.sidebar:
-    st.header("Session Manager")
-    mode = st.radio("Choose Mode", ["+ New Chat", "Resume Chat"])
-    if mode == "+ New Chat":
-        if st.button("Start New Session"):
-            new_id = str(uuid.uuid4())[:8]
-            st.session_state.session_id = new_id
-            st.session_state.messages = []
-            st.session_state.file = None
-            st.rerun()
-    elif mode == "Resume Chat":
-        session_id = st.text_input("Enter Session ID")
-        if st.button("Load Chat"):
-            with st.spinner("Loading chat"):
-                if load_session(session_id):
-                    st.session_state.session_id = session_id
-                    st.session_state.loaded = True
-                    st.rerun()
-                else:
-                    st.error("Session ID not found!")
-    
-    if st.session_state.get("loaded"):
-        st.success(f"Successfully loaded!")
-        del st.session_state.loaded
+    st.subheader("Login")
+    user_id = st.text_input("User ID", key = "user_id_input", on_change = handle_user_change)
+    if not user_id:
+        st.warning("Please enter a User ID to start")
+        st.session_state.messages = []
+        st.session_state.file = None
+        if "chat" in st.session_state: del st.session_state.chat
+        if "session_id" in st.session_state: del st.session_state.session_id
 
-    if "session_id" in st.session_state:
-        st.caption(f"Current session ID: `{st.session_state.session_id}`")
-        st.caption("Save this ID to resume this chapter later")
-    else:
-        st.session_state.session_id = str(uuid.uuid4())[:8]
+        st.stop()
+    
+    if user_id:
+        st.divider()
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.caption(f"History for **{user_id}**")
+        with col2:
+            if st.button("➕"):
+                st.session_state.session_id = create_new_session(user_id)
+                st.session_state.messages = []
+                st.session_state.file= []
+                if "chat" in st.session_state: del st.session_state.chat
+                st.rerun()
+
+        past_sessions = get_user_sessions(user_id)
+        for sess_id in past_sessions:
+            if st.button(f"Chat {sess_id}", key = f"btn_{sess_id}", use_container_width = True):
+                if load_session(sess_id):
+                    st.session_state.session_id = sess_id
+                    st.session_state.file = []
+                    if "chat" in st.session_state: del st.session_state.chat
+                    st.rerun()
         
     st.divider()
 
@@ -100,6 +135,16 @@ with st.sidebar:
     
     if not uploaded_file and "file" in st.session_state:
         del st.session_state.file
+
+if "chat" not in st.session_state:
+    history_payload = []
+    if "messages" in st.session_state:
+        history_payload = get_history_for_gemini(st.session_state.messages)
+    
+    st.session_state.chat = st.session_state.client.chats.create(
+        model = "gemini-2.5-flash",
+        history=history_payload
+    )
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
@@ -120,5 +165,4 @@ if prompt := st.chat_input("Ask Anything"):
 
     st.session_state.messages.append({"role": "assistant", "content": response.text})
 
-    if "session_id" in st.session_state:
-        save_session(st.session_state.session_id)
+    save_session(st.session_state.session_id)
